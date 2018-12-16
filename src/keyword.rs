@@ -2,6 +2,7 @@ use crate::models::{Keyword, Entry, NewKeyword, NewEntry};
 use failure::Error;
 use diesel::prelude::*;
 use diesel::pg::PgConnection;
+use std::borrow::Cow;
 
 pub struct KeywordDetails {
     pub keyword: Keyword,
@@ -116,7 +117,8 @@ impl KeywordDetails {
         };
         Ok(entries)
     }
-    pub fn get(word: &str, c: &str, dbc: &PgConnection) -> Result<Option<Self>, Error> {
+    pub fn get<'a, T: Into<Cow<'a, str>>>(word: T, c: &str, dbc: &PgConnection) -> Result<Option<Self>, Error> {
+        let word = word.into();
         let keyword: Option<Keyword> = {
             use crate::schema::keywords::dsl::*;
             keywords.filter(name.ilike(word).and(chan.eq(c).or(chan.eq("*"))))
@@ -125,6 +127,11 @@ impl KeywordDetails {
         };
         if let Some(k) = keyword {
             let entries = Self::get_entries(k.id, dbc)?;
+            if let Some(e0) = entries.get(0) {
+                if e0.text.starts_with("see: ") {
+                    return Self::get(e0.text.replace("see: ", ""), c, dbc);
+                }
+            }
             Ok(Some(KeywordDetails {
                 keyword: k,
                 entries

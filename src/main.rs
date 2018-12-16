@@ -58,9 +58,9 @@ impl App {
     }
     pub fn handle_privmsg(&mut self, from: &str, chan: &str, msg: &str) -> Result<(), Error> {
         lazy_static! {
-            static ref LEARN_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>[^\[]*):\s*(?P<val>.*)"#).unwrap();
-            static ref QUERY_RE: Regex = Regex::new(r#"^\?\?\s*(?P<subj>[^\[]*)(?P<idx>\[[^\]]+\])?"#).unwrap();
-            static ref MOVE_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>[^\[]*)(?P<idx>\[[^\]]+\])->(?P<new_idx>.*)"#).unwrap();
+            static ref LEARN_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>[^\[:]*):\s*(?P<val>.*)"#).unwrap();
+            static ref QUERY_RE: Regex = Regex::new(r#"^\?\?\s*(?P<subj>[^\[:]*)(?P<idx>\[[^\]]+\])?"#).unwrap();
+            static ref MOVE_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>[^\[:]*)(?P<idx>\[[^\]]+\])->(?P<new_idx>.*)"#).unwrap();
         }
         let nick = from.split("!").next().ok_or(format_err!("Invalid source"))?;
         let tgt = if chan.starts_with("#") {
