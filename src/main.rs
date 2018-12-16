@@ -37,7 +37,7 @@ impl App {
         self.cli.send_notice(nick, format!("[{}] \x0304Error:\x0f {}", chan, msg))?;
         Ok(())
     }
-    pub fn keyword_from_captures(&mut self, learn: &::regex::Captures, nick: &str, chan: &str) -> Result<Option<KeywordDetails>, Error> {
+    pub fn keyword_from_captures(&mut self, learn: &::regex::Captures, nick: &str, chan: &str) -> Result<KeywordDetails, Error> {
         debug!("Fetching keyword for captures: {:?}", learn);
         let subj = &learn["subj"];
         let learn_chan = if learn.name("gen").is_some() {
@@ -47,16 +47,14 @@ impl App {
             chan
         };
         if !chan.starts_with("#") && learn_chan != "*" {
-            self.report_error(nick, chan, "Only general entries may be taught via PM.")?;
-            return Ok(None);
+            Err(format_err!("Only general entries may be taught via PM."))?;
         }
         debug!("Fetching keyword '{}' for chan {}", subj, learn_chan);
         let kwd = KeywordDetails::get_or_create(subj, learn_chan, &self.pg)?;
         if kwd.keyword.chan == "*" && !self.cfg.admins.contains(nick) {
-            self.report_error(nick, chan, "Only administrators can create or modify general entries.")?;
-            return Ok(None);
+            Err(format_err!("Only administrators can create or modify general entries."))?;
         }
-        Ok(Some(kwd))
+        Ok(kwd)
     }
     pub fn handle_privmsg(&mut self, from: &str, chan: &str, msg: &str) -> Result<(), Error> {
         lazy_static! {
@@ -74,10 +72,9 @@ impl App {
         debug!("[{}] <{}> {}", chan, nick, msg);
         if let Some(learn) = LEARN_RE.captures(msg) {
             let val = &learn["val"];
-            if let Some(mut kwd) = self.keyword_from_captures(&learn, nick, chan)? {
-                let idx = kwd.learn(nick, val, &self.pg)?;
-                self.cli.send_notice(tgt, kwd.format_entry(idx).unwrap())?;
-            }
+            let mut kwd = self.keyword_from_captures(&learn, nick, chan)?;
+            let idx = kwd.learn(nick, val, &self.pg)?;
+            self.cli.send_notice(tgt, kwd.format_entry(idx).unwrap())?;
         }
         else if let Some(mv) = MOVE_RE.captures(msg) {
             let idx = &mv["idx"];
@@ -95,15 +92,14 @@ impl App {
                     return Ok(());
                 }
             };
-            if let Some(mut kwd) = self.keyword_from_captures(&mv, nick, chan)? {
-                if new_idx < 0 {
-                    kwd.delete(idx, &self.pg)?;
-                    self.cli.send_notice(tgt, format!("\x02{}\x0f: Deleted entry {}.", kwd.keyword.name, idx))?;
-                }
-                else {
-                    kwd.swap(idx, new_idx as _, &self.pg)?;
-                    self.cli.send_notice(tgt, format!("\x02{}\x0f: Swapped entries {} and {}.", kwd.keyword.name, idx, new_idx))?;
-                }
+            let mut kwd = self.keyword_from_captures(&mv, nick, chan)?;
+            if new_idx < 0 {
+                kwd.delete(idx, &self.pg)?;
+                self.cli.send_notice(tgt, format!("\x02{}\x0f: Deleted entry {}.", kwd.keyword.name, idx))?;
+            }
+            else {
+                kwd.swap(idx, new_idx as _, &self.pg)?;
+                self.cli.send_notice(tgt, format!("\x02{}\x0f: Swapped entries {} and {}.", kwd.keyword.name, idx, new_idx))?;
             }
         }
         else if let Some(query) = QUERY_RE.captures(msg) {
@@ -164,7 +160,11 @@ impl App {
     pub fn handle_msg(&mut self, m: Message) -> Result<(), Error> {
         if let Command::PRIVMSG(channel, message) = m.command {
             if let Some(src) = m.prefix {
-                self.handle_privmsg(&src, &channel, &message)?;
+                if let Err(e) = self.handle_privmsg(&src, &channel, &message) {
+                    if let Some(nick) = src.split("!").next() {
+                        self.report_error(nick, &channel, e)?;
+                    }
+                }
             }
         }
         Ok(())

@@ -77,7 +77,7 @@ impl KeywordDetails {
     pub fn format_entry(&self, idx: usize) -> Option<String> {
         if let Some(ent) = self.entries.get(idx.saturating_sub(1)) {
             let gen_clr = if self.keyword.chan == "*" { "\x0307" } else { "" };
-            Some(format!("\x02{}{}\x0f[{}/{}]: {} \x0314[{}]\x0f", gen_clr, self.keyword.name, idx, self.entries.len(), ent.text, ent.creation_ts.date()))
+            Some(format!("\x02{}{}\x0f\x0315[{}/{}]\x0f: {} \x0f\x0314[{}]\x0f", gen_clr, self.keyword.name, idx, self.entries.len(), ent.text, ent.creation_ts.date()))
         }
         else {
             None
