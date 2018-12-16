@@ -19,6 +19,7 @@ use failure::Error;
 use regex::Regex;
 use self::models::{Keyword, Entry, NewKeyword, NewEntry};
 use std::fmt::Display;
+use std::collections::HashSet;
 
 mod schema;
 mod models;
@@ -28,11 +29,14 @@ pub struct Config {
     database_url: String,
     irc_config_path: String,
     #[serde(default)]
+    admins: HashSet<String>,
+    #[serde(default)]
     log_filter: Option<String>
 }
 pub struct App {
     cli: IrcClient,
-    pg: PgConnection
+    pg: PgConnection,
+    cfg: Config
 }
 pub struct KeywordDetails {
     keyword: Keyword,
@@ -59,7 +63,8 @@ impl KeywordDetails {
     }
     pub fn format_entry(&self, idx: usize) -> Option<String> {
         if let Some(ent) = self.entries.get(idx.wrapping_sub(1)) {
-            Some(format!("\x02{}\x0f[{}/{}]: {} \x0303[{}]\x0f", self.keyword.name, idx, self.entries.len(), ent.text, ent.creation_ts.date()))
+            let gen_clr = if self.keyword.chan == "*" { "\x0307" } else { "" };
+            Some(format!("\x02{}{}\x0f[{}/{}]: {} \x0314[{}]\x0f", gen_clr, self.keyword.name, idx, self.entries.len(), ent.text, ent.creation_ts.date()))
         }
         else {
             None
@@ -92,7 +97,7 @@ impl KeywordDetails {
     pub fn get(word: &str, c: &str, dbc: &PgConnection) -> Result<Option<Self>, Error> {
         let keyword: Option<Keyword> = {
             use self::schema::keywords::dsl::*;
-            keywords.filter(name.ilike(word).and(chan.eq(c)))
+            keywords.filter(name.ilike(word).and(chan.eq(c).or(chan.eq("*"))))
                 .first(dbc)
                 .optional()?
         };
@@ -115,49 +120,74 @@ impl KeywordDetails {
 }
 impl App {
     pub fn report_error<T: Display>(&mut self, nick: &str, chan: &str, msg: T) -> Result<(), Error> {
-        self.cli.send_notice(chan, format!("{}: Error: {}", nick, msg))?;
+        self.cli.send_privmsg(chan, format!("{}: \x0304Error:\x0f {}", nick, msg))?;
         Ok(())
     }
     pub fn handle_privmsg(&mut self, from: &str, chan: &str, msg: &str) -> Result<(), Error> {
         lazy_static! {
-            static ref LEARN_RE: Regex = Regex::new(r#"^\?\?\s*(.*):\s*(.*)"#).unwrap();
-            static ref QUERY_RE: Regex = Regex::new(r#"^\?\?\s*([^\[]*)(\[[0-9]+|\*\])?"#).unwrap();
+            static ref LEARN_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>.*):\s*(?P<val>.*)"#).unwrap();
+            static ref QUERY_RE: Regex = Regex::new(r#"^\?\?\s*(?P<subj>[^\[]*)(?P<idx>\[[^\]]+\])?"#).unwrap();
         }
         let nick = from.split("!").next().ok_or(format_err!("Invalid source"))?;
         if let Some(learn) = LEARN_RE.captures(msg) {
-            let subj = &learn[1];
-            let val = &learn[2];
+            let subj = &learn["subj"];
+            let val = &learn["val"];
+            let learn_chan = if learn.name("gen").is_some() {
+                "*"
+            }
+            else {
+                chan
+            };
             debug!("Learning {}: {}", subj, val);
-            let mut kwd = KeywordDetails::get_or_create(subj, chan, &self.pg)?;
+            let mut kwd = KeywordDetails::get_or_create(subj, learn_chan, &self.pg)?;
+            if kwd.keyword.chan == "*" && !self.cfg.admins.contains(nick) {
+                self.report_error(nick, chan, "Only administrators can create or modify general entries.")?;
+                return Ok(());
+            }
             let idx = kwd.learn(nick, val, &self.pg)?;
             self.cli.send_notice(chan, kwd.format_entry(idx).unwrap())?;
         }
         else if let Some(query) = QUERY_RE.captures(msg) {
-            let subj = &query[1];
-            let idx = match query.get(2) {
+            let subj = &query["subj"];
+            let idx = match query.name("idx") {
                 Some(i) => {
-                    Some(match i.as_str() {
-                        "all" => -1,
-                        x => x.get(1..x.len()).ok_or(format_err!("invalid index"))?.parse::<i32>()?,
-                    })
+                    let i = i.as_str();
+                    if let Some(x) = i.get(1..(i.len()-1)) {
+                        match x {
+                            "*" => Some(-1),
+                            x => x.parse::<i32>().ok(),
+                        }
+                    }
+                    else {
+                        None
+                    }
                 },
                 None => None,
             };
             debug!("Querying {} with idx {:?}", subj, idx);
             match KeywordDetails::get(subj, chan, &self.pg)? {
                 Some(kwd) => {
-                    if let Some(idx) = idx {
+                    if let Some(mut idx) = idx {
                         if idx == -1 {
                             for i in 0..kwd.entries.len() {
                                 self.cli.send_notice(chan, kwd.format_entry(i+1).unwrap())?;
                             }
                         }
                         else {
+                            if idx == 0 {
+                                idx = 1;
+                            }
                             if let Some(ent) = kwd.format_entry(idx as _) {
                                 self.cli.send_notice(chan, ent)?;
                             }
                             else {
-                                self.cli.send_notice(chan, format!("{}: only has {} entries", subj, kwd.entries.len()))?;
+                                let pluralised = if kwd.entries.len() == 1 {
+                                    "entry"
+                                }
+                                else {
+                                    "entries"
+                                };
+                                self.cli.send_notice(chan, format!("\x02{}\x0f: only has \x02\x0304{}\x0f {}", subj, kwd.entries.len(), pluralised))?;
                             }
                         }
                     }
@@ -166,12 +196,12 @@ impl App {
                             self.cli.send_notice(chan, ent)?;
                         }
                         else {
-                            self.cli.send_notice(chan, format!("{}: blank keyword", subj))?;
+                            self.cli.send_notice(chan, format!("\x02{}\x0f: no entries yet", subj))?;
                         }
                     }
                 },
                 None => {
-                    self.cli.send_notice(chan, format!("{}: no entries yet", subj))?;
+                    self.cli.send_notice(chan, format!("\x02{}\x0f: never heard of it", subj))?;
                 }
             }
         }
@@ -192,16 +222,16 @@ fn main() -> Result<(), Error> {
     let mut settings = config::Config::default();
     settings.merge(config::File::with_name("paroxysm"))?;
     let cfg: Config = settings.try_into()?;
-    let env = env_logger::Env::new().default_filter_or(cfg.log_filter.unwrap_or(default_log_filter));
+    let env = env_logger::Env::new().default_filter_or(cfg.log_filter.clone().unwrap_or(default_log_filter));
     env_logger::init_from_env(env);
     info!("paroxysm starting up");
     info!("connecting to database");
     let pg = PgConnection::establish(&cfg.database_url)?;
     info!("connecting to IRC");
-    let cli = IrcClient::new(cfg.irc_config_path)?;
+    let cli = IrcClient::new(&cfg.irc_config_path)?;
     cli.identify()?;
     let st = cli.stream();
-    let mut app = App { cli, pg };
+    let mut app = App { cli, pg, cfg };
     info!("running!");
     st.for_each_incoming(|m| {
         if let Err(e) = app.handle_msg(m) {
