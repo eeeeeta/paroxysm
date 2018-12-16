@@ -3,6 +3,7 @@ table! {
         id -> Int4,
         keyword_id -> Int4,
         idx -> Int4,
+        text -> Varchar,
         creation_ts -> Timestamp,
         created_by -> Varchar,
     }
