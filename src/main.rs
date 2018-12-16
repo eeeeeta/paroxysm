@@ -34,46 +34,86 @@ pub struct App {
 
 impl App {
     pub fn report_error<T: Display>(&mut self, nick: &str, chan: &str, msg: T) -> Result<(), Error> {
-        self.cli.send_privmsg(chan, format!("{}: \x0304Error:\x0f {}", nick, msg))?;
+        self.cli.send_notice(nick, format!("[{}] \x0304Error:\x0f {}", chan, msg))?;
         Ok(())
+    }
+    pub fn keyword_from_captures(&mut self, learn: &::regex::Captures, nick: &str, chan: &str) -> Result<Option<KeywordDetails>, Error> {
+        debug!("Fetching keyword for captures: {:?}", learn);
+        let subj = &learn["subj"];
+        let learn_chan = if learn.name("gen").is_some() {
+            "*"
+        }
+        else {
+            chan
+        };
+        if !chan.starts_with("#") && learn_chan != "*" {
+            self.report_error(nick, chan, "Only general entries may be taught via PM.")?;
+            return Ok(None);
+        }
+        debug!("Fetching keyword '{}' for chan {}", subj, learn_chan);
+        let kwd = KeywordDetails::get_or_create(subj, learn_chan, &self.pg)?;
+        if kwd.keyword.chan == "*" && !self.cfg.admins.contains(nick) {
+            self.report_error(nick, chan, "Only administrators can create or modify general entries.")?;
+            return Ok(None);
+        }
+        Ok(Some(kwd))
     }
     pub fn handle_privmsg(&mut self, from: &str, chan: &str, msg: &str) -> Result<(), Error> {
         lazy_static! {
-            static ref LEARN_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>.*):\s*(?P<val>.*)"#).unwrap();
+            static ref LEARN_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>[^\[]*):\s*(?P<val>.*)"#).unwrap();
             static ref QUERY_RE: Regex = Regex::new(r#"^\?\?\s*(?P<subj>[^\[]*)(?P<idx>\[[^\]]+\])?"#).unwrap();
+            static ref MOVE_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>[^\[]*)(?P<idx>\[[^\]]+\])->(?P<new_idx>.*)"#).unwrap();
         }
         let nick = from.split("!").next().ok_or(format_err!("Invalid source"))?;
+        let tgt = if chan.starts_with("#") {
+            chan
+        }
+        else {
+            nick
+        };
+        debug!("[{}] <{}> {}", chan, nick, msg);
         if let Some(learn) = LEARN_RE.captures(msg) {
-            let subj = &learn["subj"];
             let val = &learn["val"];
-            let learn_chan = if learn.name("gen").is_some() {
-                "*"
+            if let Some(mut kwd) = self.keyword_from_captures(&learn, nick, chan)? {
+                let idx = kwd.learn(nick, val, &self.pg)?;
+                self.cli.send_notice(tgt, kwd.format_entry(idx).unwrap())?;
             }
-            else {
-                chan
+        }
+        else if let Some(mv) = MOVE_RE.captures(msg) {
+            let idx = &mv["idx"];
+            let idx = match idx[1..(idx.len()-1)].parse::<usize>() {
+                Ok(i) => i,
+                Err(e) => {
+                    self.report_error(nick, chan, format!("Could not parse index: {}", e))?;
+                    return Ok(());
+                }
             };
-            debug!("Learning {}: {}", subj, val);
-            let mut kwd = KeywordDetails::get_or_create(subj, learn_chan, &self.pg)?;
-            if kwd.keyword.chan == "*" && !self.cfg.admins.contains(nick) {
-                self.report_error(nick, chan, "Only administrators can create or modify general entries.")?;
-                return Ok(());
+            let new_idx = match mv["new_idx"].parse::<i32>() {
+                Ok(i) => i,
+                Err(e) => {
+                    self.report_error(nick, chan, format!("Could not parse target index: {}", e))?;
+                    return Ok(());
+                }
+            };
+            if let Some(mut kwd) = self.keyword_from_captures(&mv, nick, chan)? {
+                if new_idx < 0 {
+                    kwd.delete(idx, &self.pg)?;
+                    self.cli.send_notice(tgt, format!("\x02{}\x0f: Deleted entry {}.", kwd.keyword.name, idx))?;
+                }
+                else {
+                    kwd.swap(idx, new_idx as _, &self.pg)?;
+                    self.cli.send_notice(tgt, format!("\x02{}\x0f: Swapped entries {} and {}.", kwd.keyword.name, idx, new_idx))?;
+                }
             }
-            let idx = kwd.learn(nick, val, &self.pg)?;
-            self.cli.send_notice(chan, kwd.format_entry(idx).unwrap())?;
         }
         else if let Some(query) = QUERY_RE.captures(msg) {
             let subj = &query["subj"];
             let idx = match query.name("idx") {
                 Some(i) => {
                     let i = i.as_str();
-                    if let Some(x) = i.get(1..(i.len()-1)) {
-                        match x {
-                            "*" => Some(-1),
-                            x => x.parse::<i32>().ok(),
-                        }
-                    }
-                    else {
-                        None
+                    match &i[1..(i.len()-1)] {
+                        "*" => Some(-1),
+                        x => x.parse::<usize>().map(|x| x as i32).ok(),
                     }
                 },
                 None => None,
@@ -84,7 +124,7 @@ impl App {
                     if let Some(mut idx) = idx {
                         if idx == -1 {
                             for i in 0..kwd.entries.len() {
-                                self.cli.send_notice(chan, kwd.format_entry(i+1).unwrap())?;
+                                self.cli.send_notice(tgt, kwd.format_entry(i+1).unwrap())?;
                             }
                         }
                         else {
@@ -92,7 +132,7 @@ impl App {
                                 idx = 1;
                             }
                             if let Some(ent) = kwd.format_entry(idx as _) {
-                                self.cli.send_notice(chan, ent)?;
+                                self.cli.send_notice(tgt, ent)?;
                             }
                             else {
                                 let pluralised = if kwd.entries.len() == 1 {
@@ -101,21 +141,21 @@ impl App {
                                 else {
                                     "entries"
                                 };
-                                self.cli.send_notice(chan, format!("\x02{}\x0f: only has \x02\x0304{}\x0f {}", subj, kwd.entries.len(), pluralised))?;
+                                self.cli.send_notice(tgt, format!("\x02{}\x0f: only has \x02\x0304{}\x0f {}", subj, kwd.entries.len(), pluralised))?;
                             }
                         }
                     }
                     else {
                         if let Some(ent) = kwd.format_entry(1) {
-                            self.cli.send_notice(chan, ent)?;
+                            self.cli.send_notice(tgt, ent)?;
                         }
                         else {
-                            self.cli.send_notice(chan, format!("\x02{}\x0f: no entries yet", subj))?;
+                            self.cli.send_notice(tgt, format!("\x02{}\x0f: no entries yet", subj))?;
                         }
                     }
                 },
                 None => {
-                    self.cli.send_notice(chan, format!("\x02{}\x0f: never heard of it", subj))?;
+                    self.cli.send_notice(tgt, format!("\x02{}\x0f: never heard of it", subj))?;
                 }
             }
         }
@@ -132,7 +172,7 @@ impl App {
 }
 fn main() -> Result<(), Error> {
     println!("[+] loading configuration");
-    let default_log_filter = concat!("paroxysm=info").to_string();
+    let default_log_filter = "paroxysm=info".to_string();
     let mut settings = config::Config::default();
     settings.merge(config::File::with_name("paroxysm"))?;
     let cfg: Config = settings.try_into()?;
