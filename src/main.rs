@@ -60,6 +60,7 @@ impl App {
         lazy_static! {
             static ref LEARN_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>[^\[:]*):\s*(?P<val>.*)"#).unwrap();
             static ref QUERY_RE: Regex = Regex::new(r#"^\?\?\s*(?P<subj>[^\[:]*)(?P<idx>\[[^\]]+\])?"#).unwrap();
+            static ref INCREMENT_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>[^\[:]*)(?P<incrdecr>(++|--))"#).unwrap();
             static ref MOVE_RE: Regex = Regex::new(r#"^\?\?(?P<gen>!)?\s*(?P<subj>[^\[:]*)(?P<idx>\[[^\]]+\])->(?P<new_idx>.*)"#).unwrap();
         }
         let nick = from.split("!").next().ok_or(format_err!("Invalid source"))?;
@@ -100,6 +101,34 @@ impl App {
             else {
                 kwd.swap(idx, new_idx as _, &self.pg)?;
                 self.cli.send_notice(tgt, format!("\x02{}\x0f: Swapped entries {} and {}.", kwd.keyword.name, idx, new_idx))?;
+            }
+        }
+        else if let Some(icr) = INCREMENT_RE.captures(msg) {
+            let mut kwd = self.keyword_from_captures(&icr, nick, chan)?;
+            let is_incr = &icr["incrdecr"] == "++";
+            let now = chrono::Utc::now().naive_utc().date();
+            let mut idx = None;
+            for (i, ent) in kwd.entries.iter().enumerate() {
+                if ent.creation_ts.date() == now {
+                    if let Ok(val) = ent.text.parse::<i32>() {
+                        let val = if is_incr {
+                            val + 1
+                        }
+                        else {
+                            val - 1
+                        };
+                        idx = Some((i+1, val));
+                    }
+                }
+            }
+            if let Some((i, val)) = idx {
+                kwd.update(i, &val.to_string(), &self.pg)?;
+                self.cli.send_notice(tgt, kwd.format_entry(i).unwrap())?;
+            }
+            else {
+                let val = if is_incr { 1 } else { -1 };
+                let idx = kwd.learn(nick, &val.to_string(), &self.pg)?;
+                self.cli.send_notice(tgt, kwd.format_entry(idx).unwrap())?;
             }
         }
         else if let Some(query) = QUERY_RE.captures(msg) {

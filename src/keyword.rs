@@ -55,6 +55,17 @@ impl KeywordDetails {
         self.process_moves(&moves, dbc)?;
         Ok(())
     }
+    pub fn update(&mut self, idx: usize, val: &str, dbc: &PgConnection) -> Result<(), Error> {
+        let ent = self.entries.get_mut(idx.saturating_sub(1)).ok_or(format_err!("No such element to update."))?;
+        {
+            use crate::schema::entries::dsl::*;
+            ::diesel::update(entries.filter(id.eq(ent.id)))
+                .set(text.eq(val))
+                .execute(dbc)?;
+        }
+        ent.text = val.to_string();
+        Ok(())
+    }
     pub fn delete(&mut self, idx: usize, dbc: &PgConnection) -> Result<(), Error> {
         // step 1: delete the element
         {
